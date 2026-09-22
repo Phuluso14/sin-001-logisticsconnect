@@ -1,0 +1,20 @@
+package co.wethinkcode.logisticsconnect;
+
+public class Hub {
+    private String hubId;
+    private String province;
+    private String sortingcenter;
+    private boolean active;
+
+    public Hub() {}
+
+    public String getHubId() { return hubId; }
+    public String getProvince() { return province; }
+    public String getSortingCenter() { return sortingCenter; }
+    public boolean isActive() { return active; }
+
+    public void setHubId(String hubId) { this.hubId = hubId; }
+    public void setProvince(String province) { this.province = province; }
+    public void setSortingCenter(String sortingCenter) { this.sortingCenter = sortingCenter; }
+    public void setActive(boolean active) { this.active = active; }
+}
