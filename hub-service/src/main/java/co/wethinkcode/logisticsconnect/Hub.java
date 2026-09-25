@@ -3,7 +3,7 @@ package co.wethinkcode.logisticsconnect;
 public class Hub {
     private String hubId;
     private String province;
-    private String sortingcenter;
+    private String sortingCenter;
     private boolean active;
 
     public Hub() {}

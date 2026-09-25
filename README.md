@@ -1,179 +1,477 @@
 # LogisticsConnect
 
-## Overview
+LogisticsConnect is a Java-based distributed logistics system that demonstrates how multiple services can communicate using **REST APIs**, **JSON**, and **JMS messaging**.
 
-Supply chain parcel delivery hub and transit delay tracking.
+The system represents a logistics environment where packages move through different hubs and their status can be tracked as they progress through the system.
 
-Domain entities: hubs, sorting centers, regional districts.
+---
 
-Every class in this repo lives in a single flat package, `co.wethinkcode.logisticsconnect`. LogisticsConnect is built
-as a small set of independent services, following a growth path from simple data
-cleanup through synchronous REST calls to asynchronous MQ decoupling and alerting:
+## Architecture
 
-1. clean a messy legacy CSV export (`hubs-global.csv`) — handled by **IngestionServiceApp**
-2. serve it up and act on it, via three REST services calling each other directly
-   over HTTP
-3. decouple the relevant services with an ActiveMQ topic (`package-status-topic`) instead of
-   direct calls — shared broker setup lives in [`common/`](common)
-4. raise the alarm on failure — handled by **AlertBotApp**
+```text
+                    hubs-global.csv
+                          |
+                          v
+                +--------------------+
+                | Ingestion Service  |
+                |      :7050         |
+                +---------+----------+
+                          |
+                         REST
+                          |
+                          v
+                +--------------------+
+                |    Hub Service     |
+                |      :7051         |
+                +---------+----------+
+                          |
+                         REST
+                          |
+                          v
+                +--------------------+
+                |  Transit Service  |
+                |      :7053         |
+                +--------------------+
+                          ^
+                          |
+                    JMS message
+                          |
+             +------------+-------------+
+             | package-status-topic     |
+             |       ActiveMQ           |
+             +------------+-------------+
+                          ^
+                          |
+                    JMS publish
+                          |
+                +---------+----------+
+                | Delay Stage Service|
+                |      :7052         |
+                +--------------------+
 
-| Service | Folder | Port | Role |
-|---|---|---|---|
-| IngestionServiceApp | [`ingestion-service/`](ingestion-service) | 7050 | Parses and cleans `hubs-global.csv` |
-| HubServiceApp | [`hub-service/`](hub-service) | 7051 | Serves provinces and sorting centers (place-name source of truth). |
-| DelayStageServiceApp | [`delay-stage-service/`](delay-stage-service) | 7052 | Tracks the Transit Delay Stage (0-8, e.g. weather shutdowns). |
-| TransitServiceApp | [`transit-service/`](transit-service) | 7053 | Calculates estimated arrival windows based on hub and delay stage. |
-| AlertBotApp | [`alertbot/`](alertbot) | 7054 | posts proactive delay notifications to public transit social media pages (simulated). |
-
-Plus [`common/`](common) (no port) — the shared ActiveMQ broker and MQ config notes
-for `package-status-topic`: Package status updates move from latency-driven RPC to bandwidth-driven messaging.
-
-**Status:** scaffold only — build files, Javalin bootstrap, and TODOs are in place; no
-business logic has been implemented yet.
-
-## Your task
-
-Implement the four stages below, in order — each one builds on the last, and the
-later stages assume the earlier ones work. Stage 1-3 are required; stage 4 is a
-stretch goal if you have time left.
-
-| Stage | Required? | What "done" looks like | Rough effort |
-|---|---|---|---|
-| 1. Clean `hubs-global.csv` | Required | IngestionServiceApp exposes the cleaned records via REST (see [Integration contracts](#integration-contracts)); every issue category in [ingestion-service/README.md](ingestion-service/README.md#known-data-issues) is handled | ~1-1.5h |
-| 2. Wire up the REST services | Required | hub-service, delay-stage-service, and transit-service each expose real domain endpoints (not just `/health`) and call each other synchronously per the contracts below; `transit-service` can return an ETA for a hub | ~1.5-2h |
-| 3. Decouple with the MQ topic | Required | `delay-stage-service` publishes to `package-status-topic` on stage change; `transit-service` subscribes instead of calling `delay-stage-service` directly; broker runs via `common/docker-compose.yml` | ~1h |
-| 4. AlertBot | Stretch | `alertbot` subscribes to `package-status-topic` and simulates posting an alert when a hub's delay stage crosses a threshold you choose | ~30-45m |
-
-You don't need to match any exact field names, endpoint paths, or message shapes —
-the ones below are illustrative. Favor a working, readable implementation over a
-gold-plated one; partial completion of stage 3 or 4 is fine if 1-2 are solid.
-
-## Integration contracts
-
-Two kinds of integration point exist in this repo: synchronous REST calls (stage 2)
-and the asynchronous MQ topic (stage 3). Field/endpoint names below are illustrative
-— reasonable variations are fine as long as the shape (who calls whom, with what
-kind of payload) is preserved.
-
-### REST (stage 2)
-
-| Caller | Callee | Example | Purpose |
-|---|---|---|---|
-| hub-service | ingestion-service | `GET :7050/hubs` → JSON array of cleaned hub records | hub-service loads its place-name data from the cleaned CSV output instead of re-parsing it itself |
-| transit-service | hub-service | `GET :7051/hubs/{hubId}` → hub/sorting-center details | transit-service needs hub location data to calculate an ETA |
-| transit-service | delay-stage-service | `GET :7052/delay-stage/{hubId}` → `{ "hubId": "H-501", "stage": 3 }` | transit-service needs the current delay stage to calculate an ETA — **this call is replaced by the MQ subscription in stage 3** |
-| (client) | delay-stage-service | `POST :7052/delay-stage/{hubId}` with a body like `{ "stage": 3 }` | the stage/state-change endpoint referenced in [common/README.md](common/README.md) — this is also where the stage-3 MQ publish happens |
-
-### MQ (stage 3) — topic `package-status-topic`
-
-Already documented in detail in [common/README.md](common/README.md): broker URL and
-topic name come from the shared `co.wethinkcode.logisticsconnect.mq.MqConfig` class,
-duplicated into each participating service.
-
-- **Producer:** `delay-stage-service`, on its stage/state-change endpoint above.
-- **Consumers:** `transit-service` (replacing its direct REST call to
-  delay-stage-service) and, for the stretch goal, `alertbot`.
-- **Example message shape:** `{ "hubId": "H-501", "stage": 5, "timestamp": "2026-07-18T10:15:00Z" }`
-
-## Project structure
-
-```
-logisticsconnect/
-├── README.md
-├── .gitignore
-├── ingestion-service/          (port 7050)
-│   ├── pom.xml
-│   ├── README.md
-│   └── src/main/
-│       ├── java/co/wethinkcode/logisticsconnect/IngestionServiceApp.java
-│       └── resources/hubs-global.csv
-├── hub-service/          (port 7051)
-├── delay-stage-service/          (port 7052)
-├── transit-service/          (port 7053)
-├── common/
-│   ├── docker-compose.yml
-│   └── README.md
-└── alertbot/          (port 7054)
+                         |
+                         | same topic
+                         v
+                +--------------------+
+                |     AlertBot       |
+                |      :7054         |
+                +--------------------+
 ```
 
-## Build
 
-Requirements: Java 17+, Maven 3.8+, Docker (for the broker in `common/`).
+### Services
 
-Every folder here (`ingestion-service/`, each domain service, and `alertbot/`) is
-an **independent** Maven project — there is no parent/aggregator pom. Build one at a
-time, e.g.:
+| Service             | Port | Responsibility                                                                    |
+| ------------------- | ---: | --------------------------------------------------------------------------------- |
+| Ingestion Service   | 7050 | Reads package/hub information from the CSV file and provides it to other services |
+| Hub Service         | 7051 | Provides hub information through a REST API                                       |
+| Delay Stage Service | 7052 | Processes package status and detects delays                                       |
+| Transit Service     | 7053 | Handles package transit information                                               |
+| AlertBot Service    | 7054 | Receives package updates and provides alerts                                      |
 
-```
-cd hub-service
-mvn package
-```
+---
 
-...or build every module in the repo in one pass from the project root:
+## Technologies Used
 
-```
-find . -name pom.xml -execdir mvn -q package \;
-```
+* Java
+* Maven
+* REST APIs
+* JSON
+* JMS
+* Apache ActiveMQ
+* Docker
+* Docker Compose
+* JUnit
 
-## Run
+---
 
-```
-# ingestion
-cd ingestion-service && mvn package && java -jar target/ingestion-service.jar
+# Stage 1 - Data Ingestion
 
-# domain services, each in its own terminal
-# terminal 1
-cd hub-service && mvn package && java -jar target/hub-service.jar
-# terminal 2
-cd delay-stage-service && mvn package && java -jar target/delay-stage-service.jar
-# terminal 3
-cd transit-service && mvn package && java -jar target/transit-service.jar
+The first stage of LogisticsConnect is responsible for loading logistics information from the provided CSV file.
 
-# MQ broker (needed once the MQ-aware services above are wired up)
-cd common && docker compose up -d
+The ingestion service reads the hub/package information and makes it available through a REST endpoint.
 
-# alerting
-cd alertbot && mvn package && java -jar target/alertbot.jar
-```
+### Ingestion Service
 
-| Service | Port |
-|---|---|
-| IngestionServiceApp (`ingestion-service`) | 7050 |
-| HubServiceApp (`hub-service`) | 7051 |
-| DelayStageServiceApp (`delay-stage-service`) | 7052 |
-| TransitServiceApp (`transit-service`) | 7053 |
-| AlertBotApp (`alertbot`) | 7054 |
+The service runs on:
 
-## Test
-
-No automated tests exist yet (this is a scaffold). Each running service exposes
-`/health`, so sanity-check manually:
-
-```
-curl http://localhost:7050/health   # -> OK
+```text
+http://localhost:7050
 ```
 
-To add real tests to a module, add JUnit 5 and Surefire to its `pom.xml`:
+The purpose of this service is to separate the initial data ingestion from the rest of the application.
 
-```xml
-<dependency>
-  <groupId>org.junit.jupiter</groupId>
-  <artifactId>junit-jupiter</artifactId>
-  <version>5.10.2</version>
-  <scope>test</scope>
-</dependency>
+Instead of having every service read the CSV file directly, the ingestion service provides the data to other services.
+
+---
+
+# Stage 2 - REST Communication
+
+The second stage introduces communication between the different services using REST APIs.
+
+The services communicate using JSON data.
+
+The main communication flow is:
+
+```text
+Ingestion Service
+       |
+       v
+Hub Service
+       |
+       v
+Delay Stage Service
+       |
+       v
+Transit Service
 ```
 
-```xml
-<plugin>
-  <groupId>org.apache.maven.plugins</groupId>
-  <artifactId>maven-surefire-plugin</artifactId>
-  <version>3.2.5</version>
-</plugin>
+REST is useful when one service needs to directly request information from another service.
+
+For example:
+
+```text
+Delay Stage Service
+        |
+        | HTTP Request
+        v
+Transit Service
 ```
 
-then add tests under that module's `src/test/java/...` and run:
+The response is returned as JSON.
 
+### Why REST?
+
+REST is simple to understand and works well when a service needs an immediate response from another service.
+
+---
+
+# Stage 3 - Message Queue
+
+The third stage introduces asynchronous communication using JMS.
+
+Instead of the `delay-stage-service` directly calling the `transit-service`, the service publishes a message to a JMS topic.
+
+The topic used by the project is:
+
+```text
+package-status-topic
 ```
+
+The communication becomes:
+
+```text
+Delay Stage Service
+        |
+        | JMS Message
+        v
+package-status-topic
+        |
+        v
+Transit Service
+```
+
+This means that the delay stage does not need to wait for the transit service to process the message.
+
+---
+
+## ActiveMQ
+
+LogisticsConnect uses **Apache ActiveMQ** as the message broker.
+
+The broker is started using Docker Compose.
+
+The default broker port is:
+
+```text
+61616
+```
+
+The ActiveMQ web console is available on:
+
+```text
+http://localhost:8161
+```
+
+The application uses the following topic:
+
+```text
+package-status-topic
+```
+
+---
+
+# Running the Project
+
+## Requirements
+
+Before running the project, make sure you have:
+
+* Java installed
+* Maven installed
+* Docker installed
+* Docker Compose available
+
+---
+
+## 1. Start ActiveMQ
+
+From the project directory, run:
+
+```bash
+docker compose up -d
+```
+
+This starts the ActiveMQ message broker.
+
+You can check that the container is running with:
+
+```bash
+docker ps
+```
+
+---
+
+## 2. Build the Project
+
+Run:
+
+```bash
+mvn clean install
+```
+
+This compiles the services and runs the tests.
+
+---
+
+## 3. Start the Services
+
+Start each service using Maven or IntelliJ.
+
+### Ingestion Service
+
+```text
+Port: 7050
+```
+
+### Hub Service
+
+```text
+Port: 7051
+```
+
+### Delay Stage Service
+
+```text
+Port: 7052
+```
+
+### Transit Service
+
+```text
+Port: 7053
+```
+
+### AlertBot Service
+
+```text
+Port: 7054
+```
+
+---
+
+# REST and JSON
+
+The project uses REST endpoints for communication between services.
+
+JSON is used as the data format because it is lightweight and easy for different services to exchange.
+
+A typical JSON message can look like:
+
+```json
+{
+  "packageId": "PKG001",
+  "status": "IN_TRANSIT",
+  "hub": "JHB01"
+}
+```
+
+The receiving service can read the JSON and use the information to perform its task.
+
+---
+
+# Messaging Flow
+
+The asynchronous messaging flow uses the JMS topic:
+
+```text
+package-status-topic
+```
+
+The `delay-stage-service` publishes package status messages.
+
+The `transit-service` subscribes to the topic and receives those messages.
+
+This creates a looser connection between the services.
+
+```text
+                    +----------------------+
+                    | Delay Stage Service  |
+                    +----------+-----------+
+                               |
+                               | JMS
+                               v
+                    +----------------------+
+                    | package-status-topic |
+                    +----------+-----------+
+                               |
+                               | JMS
+                               v
+                    +----------------------+
+                    |   Transit Service    |
+                    +----------------------+
+```
+
+---
+
+# Why Use REST and Messaging?
+
+REST and messaging are used for different communication requirements.
+
+### REST
+
+REST is useful when:
+
+* A service needs information immediately.
+* One service directly requests data from another service.
+* The communication is request/response based.
+
+### Messaging
+
+Messaging is useful when:
+
+* A service can process information asynchronously.
+* The sender should not have to wait for the receiver.
+* Services should be more loosely coupled.
+* Events need to be published for other services to consume.
+
+LogisticsConnect uses both approaches to demonstrate the difference between synchronous and asynchronous communication.
+
+---
+
+# Project Structure
+
+The project is organised into separate services:
+
+```text
+LogisticsConnect/
+│
+├── ingestion-service/
+│
+├── hub-service/
+│
+├── delay-stage-service/
+│
+├── transit-service/
+│
+├── alertbot-service/
+│
+├── docs/
+│   └── architecture.png
+│
+├── docker-compose.yml
+│
+└── README.md
+```
+
+Each service has its own responsibility instead of putting the entire application into one large program.
+
+---
+
+# Design Decisions
+
+## Microservices
+
+The project is divided into multiple services so that each service has a specific responsibility.
+
+This makes it easier to understand and maintain the application.
+
+## REST
+
+REST is used where one service needs to directly communicate with another service and receive a response.
+
+## JMS
+
+JMS is used for asynchronous communication between services.
+
+The `package-status-topic` allows package status information to be published and consumed without requiring a direct REST call.
+
+## JSON
+
+JSON provides a simple format for exchanging information between services.
+
+## ActiveMQ
+
+ActiveMQ acts as the message broker between the services that use JMS.
+
+## Docker
+
+Docker is used to run the ActiveMQ broker without requiring it to be installed directly on the host machine.
+
+---
+
+# Testing
+
+The project uses tests to check that the services and their communication work as expected.
+
+Tests can be run using:
+
+```bash
 mvn test
 ```
+
+The tests should be run after making changes to ensure that existing functionality has not been broken.
+
+---
+
+# Learning Resources
+
+The project is based around concepts including:
+
+* RESTful APIs
+* JSON serialisation
+* JMS
+* Message queues and topics
+* Microservices
+* Event-driven architecture
+* Integration patterns
+
+Useful resources:
+
+* [microservices.io](https://microservices.io/)
+* [Martin Fowler - Integration Patterns](https://martinfowler.com/)
+
+---
+
+# Project Demonstration
+
+The project can be demonstrated by showing:
+
+1. The individual services.
+2. The REST communication between services.
+3. JSON being exchanged between services.
+4. ActiveMQ running through Docker.
+5. The `package-status-topic`.
+6. A message being published by the delay stage service.
+7. The transit service receiving the message.
+8. The overall architecture shown in the architecture diagram.
+
+---
+
+# Author
+
+**Phuluso Matumba**
+
+GitHub:
+
+https://github.com/Phuluso14
